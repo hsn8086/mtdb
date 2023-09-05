@@ -21,132 +21,19 @@
 @Date       : 8/28/23 8:43 PM
 """
 import json
-import math
+import time
 from pathlib import Path
-from typing import IO
+from typing import Dict, Any
 from urllib.parse import urlparse
-from zipfile import ZipFile
+
+from mtdb.io_operation import EmpID, IndexedData
+from mtdb.utils import FileLock
 
 
 def db(uri: str):
     uri_ = urlparse(uri)
     if uri_.scheme == 'file':
         return FileDB(uri)
-
-
-class EmpID:
-    def __init__(self, f: IO):
-        self.f = f
-        if f.read(1):
-            f.seek(0)
-            self.l = json.load(f)
-        else:
-            self.l = [0]
-
-    def save(self):
-        self.f.seek(0)
-        json.dump(self.l, self.f)
-        self.f.truncate()
-
-    def close(self):
-        self.save()
-        self.f.close()
-
-    def __next__(self):
-        rt = self.l.pop(0)
-        if len(self.l) == 0:
-            self.l.append(rt + 1)
-        return rt
-
-    def add(self, _id):
-        self.l.append(_id)
-        self.save()
-
-
-class ListFile:
-    def __init__(self, f: IO, item_len: int = 4):
-        self.f = f
-        self.item_len = item_len
-        self.len = f.seek(0, 2) / item_len
-        assert self.len == int(self.len)
-        self.len = int(self.len)
-
-    def __getitem__(self, item: int):
-        if item >= self.len:
-            raise IndexError
-        self.f.seek(item * self.item_len)
-        return self.f.read(self.item_len)
-
-    def __setitem__(self, key: int, value: bytes):
-        if key >= self.len:
-            raise IndexError
-        if len(value) != self.item_len:
-            raise ValueError
-        self.f.seek(key * self.item_len)
-        self.f.write(value)
-
-    def append(self, value: bytes):
-        self.f.seek(0, 2)
-        self.f.write(value)
-        self.len += 1
-
-    def insert(self, key: int, value: bytes):
-        if key > self.len:
-            raise IndexError
-        if len(value) != self.item_len:
-            raise ValueError
-        self.f.seek(key * self.item_len)
-        od = value
-        while od:
-            d = self.f.read(self.item_len)
-            if self.f.tell() != 0 and d:
-                self.f.seek(-self.item_len, 1)
-            self.f.write(od)
-
-            od = d
-        self.len += 1
-
-    def close(self):
-        self.f.close()
-
-    def __del__(self):
-        self.close()
-
-
-class IndexedData:
-    def __init__(self, data_fold: Path, index: Path, primary_key: str, idx_item_len: int = 4):
-        self.data_fold = data_fold
-        self.index = ListFile(index.open('r+b'), item_len=idx_item_len)
-        self.primary_key = primary_key
-
-    def __getitem__(self, item):
-        return json.load(open(self.data_fold / f'{int.from_bytes(self.index[item], "big", signed=False)}.json', 'r'))[
-            self.primary_key]
-
-    def binary_search(self, l, r, x):
-        if r == 0 and l == 0:
-            if x > self[0]:
-                return 1
-            return 0
-        if r >= l:
-            mid = int(l + (r - l) / 2)
-            # print(mid, self.index.len, l, r)
-            if self[mid] == x:
-                return mid
-            elif self[mid] > x:
-                return self.binary_search(l, mid - 1, x)
-            else:
-                return self.binary_search(mid + 1, r, x)
-        else:
-            if r < 0:
-                return 0
-            if l == r:
-                return r
-            else:
-                return l
-
-    def close(self):
-        self.index.close()
 
 
 class FileDB:
@@ -159,6 +46,7 @@ class FileDB:
         if not eid_path.exists():
             eid_path.touch()
         self.emp_ids = EmpID(eid_path.open('r+'))
+        self.pre_insert_idx: Dict[str, Dict] = {}
 
     def insert(self, document: dict):
         _id = next(self.emp_ids)
@@ -170,19 +58,34 @@ class FileDB:
                 if not p.exists():
                     p.touch()
 
-                lf = IndexedData(self.path / 'data', p, k, idx_item_len=6)
-                idx_insert_pos = lf.binary_search(0, lf.index.len - 1, v)
-                # if idx_insert_pos == lf.index.len:
-                #     try:
-                #         print(lf[idx_insert_pos - 1], v)
-                #     except:
-                #         pass
-                lf.index.insert(idx_insert_pos, _id.to_bytes(6, 'big', signed=False))
-                lf.close()
+                data = IndexedData(self.path / 'data', p, k, idx_item_len=6)
+                idx_insert_pos = data.binary_search(0, data.index.len - 1, v)
+                data.close()
+                self.insert_idx(k, v, _id, idx_insert_pos)
         if not (self.path / 'data').exists():
             (self.path / 'data').mkdir()
         with (self.path / 'data' / f'{_id}.json').open('w') as f:
             json.dump(document, f)
+
+    def insert_idx(self, key: str, value: Any, _id: int, pos: int):
+        value_type = type(value)
+        if f'{key}-{value_type.__name__}' not in self.pre_insert_idx:
+            self.pre_insert_idx[f'{key}-{value_type.__name__}'] = {}
+        self.pre_insert_idx[f'{key}-{value_type.__name__}'][_id] = {'pos': pos, 'key': key, 'value_type': value_type,
+                                                                    'value': value}
+
+    def insert_sche(self):
+        for path, indexes in self.pre_insert_idx.items():
+            full_path = self.path / 'index' / f'{path}.idx'
+            lock = FileLock(full_path)
+            if not lock.acquire(5):
+                return
+
+            data = IndexedData(self.path / 'data', full_path, path.split('-')[0], idx_item_len=6)
+            # print(indexes)
+            data.inserts([(d['pos'], int.to_bytes(_id, 6, 'big', signed=False)) for _id, d in indexes.items()])
+            data.close()
+            lock.release()
 
     def close(self):
         self.emp_ids.close()

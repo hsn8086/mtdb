@@ -50,28 +50,28 @@ class FileDB:
 
     def insert(self, document: dict):
         _id = next(self.emp_ids)
-        for k, v in document.items():
-            if type(v) in [int]:
-                p = (self.path / 'index' / f'{k}-{type(v).__name__}.idx')
+        for key_of_doc, val_of_doc in document.items():
+            if type(val_of_doc) in [int]:
+                p = (self.path / 'index' / f'{key_of_doc}-{type(val_of_doc).__name__}.idx')
                 if not p.parent.exists():
                     p.parent.mkdir(parents=True)
                 if not p.exists():
                     p.touch()
 
-                data = IndexedData(self.path / 'data', p, k, idx_item_len=6)
-                idx_insert_pos = data.bisect_left(0, data.index.len - 1, v)
+                data = IndexedData(self.path / 'data', p, key_of_doc, idx_item_len=6)
+                # idx_insert_pos = data.bisect_left(0, len(data.index) - 1, val_of_doc)
                 data.close()
-                self.insert_idx(k, v, _id, idx_insert_pos)
+                self.insert_idx(key_of_doc, val_of_doc, _id)
         if not (self.path / 'data').exists():
             (self.path / 'data').mkdir()
         with (self.path / 'data' / f'{_id}.json').open('w') as f:
             json.dump(document, f)
 
-    def insert_idx(self, key: str, value: Any, _id: int, pos: int):
+    def insert_idx(self, key: str, value: Any, _id: int):
         value_type = type(value)
         if f'{key}-{value_type.__name__}' not in self.pre_insert_idx:
             self.pre_insert_idx[f'{key}-{value_type.__name__}'] = {}
-        self.pre_insert_idx[f'{key}-{value_type.__name__}'][_id] = {'pos': pos, 'key': key, 'value_type': value_type,
+        self.pre_insert_idx[f'{key}-{value_type.__name__}'][_id] = { 'key': key, 'value_type': value_type,
                                                                     'value': value}
 
     def insert_sche(self):
@@ -83,7 +83,7 @@ class FileDB:
 
             data = IndexedData(self.path / 'data', full_path, path.split('-')[0], idx_item_len=6)
             # print(indexes)
-            data.inserts([(d['pos'], int.to_bytes(_id, 6, 'big', signed=False)) for _id, d in indexes.items()])
+            data.inserts([(int.to_bytes(_id, 6, 'big', signed=False),d['value']) for _id, d in indexes.items()])
             data.close()
             lock.release()
 

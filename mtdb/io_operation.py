@@ -22,15 +22,108 @@
 """
 import _collections_abc
 import collections
+import functools
 import json
 from abc import abstractmethod
 from pathlib import Path
-from typing import IO, List, Dict, Tuple, overload
+from typing import IO, List, Dict, Tuple, overload, Any
 from bisect import bisect_left
 from collections.abc import MutableSequence
+from queue import LifoQueue
+from collections import deque
 
 
 class ListFile(MutableSequence):
+    """
+    A list-like object whose items are bytes stored in a file.
+    """
+    f: IO
+    item_len: int
+    _len: int
+
+    def __init__(self, f: IO, item_len: int = 4):
+        self.f = f
+        self.item_len = item_len
+        _len = f.seek(0, 2) / item_len
+        assert _len == int(_len)  # check if the file is corrupted.
+        self._len = int(_len)
+
+    def __getitem__(self, item: int):
+        """
+        Return self[key].
+        :param item:
+        :return:
+        """
+        if item >= self._len:
+            raise IndexError
+        self.f.seek(item * self.item_len)
+        return self.f.read(self.item_len)
+
+    def __setitem__(self, index: int, value: bytes):
+        """
+        Set self[key] to value.
+        :param index:
+        :param value:
+        :return:
+        """
+        if index >= self._len:
+            raise IndexError
+        if len(value) != self.item_len:
+            raise ValueError
+
+        self.f.seek(index * self.item_len)
+        self.f.write(value)
+
+    def append(self, value: bytes):
+        """
+        Append value to the end of the list.
+        :param value:
+        :return:
+        """
+        self.f.seek(0, 2)  # seek to the end of the file.
+        self.f.write(value)
+        self._len += 1
+
+    def insert(self, index: int, value: bytes):
+        """
+        Insert value at index, shifting the subsequent values rightward.
+        :param index:
+        :param value:
+        :return:
+        """
+        if index > self._len:
+            raise IndexError
+        if len(value) != self.item_len:
+            raise ValueError
+
+        self.f.seek(index * self.item_len)
+
+        last_data = value
+        while last_data:
+            data = self.f.read(self.item_len)
+            if self.f.tell() != 0 and data:
+                self.f.seek(-self.item_len, 1)
+            self.f.write(last_data)
+
+            last_data = data
+        self._len += 1
+
+    def close(self):
+        """
+        Close the underlying file.
+        :return:
+        """
+        self.f.close()
+
+    def __del__(self):
+        self.close()
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        self.close()
+
     @overload
     @abstractmethod
     def __delitem__(self, index: int) -> None:
@@ -42,7 +135,7 @@ class ListFile(MutableSequence):
         ...
 
     def __delitem__(self, index: int) -> None:
-        if index >= self.len:
+        if index >= self._len:
             raise IndexError
         chunk_size = 1024 * 1024
         start = index * self.item_len
@@ -55,58 +148,10 @@ class ListFile(MutableSequence):
             self.f.write(d)
             start += chunk_size
         self.f.truncate(self.f.tell() - self.item_len)
-        self.len -= 1
+        self._len -= 1
 
     def __len__(self) -> int:
-        return self.len
-
-    def __init__(self, f: IO, item_len: int = 4):
-        self.f = f
-        self.item_len = item_len
-        self.len = f.seek(0, 2) / item_len
-        assert self.len == int(self.len)
-        self.len = int(self.len)
-
-    def __getitem__(self, item: int):
-        if item >= self.len:
-            raise IndexError
-        self.f.seek(item * self.item_len)
-        return self.f.read(self.item_len)
-
-    def __setitem__(self, key: int, value: bytes):
-        if key >= self.len:
-            raise IndexError
-        if len(value) != self.item_len:
-            raise ValueError
-        self.f.seek(key * self.item_len)
-        self.f.write(value)
-
-    def append(self, value: bytes):
-        self.f.seek(0, 2)
-        self.f.write(value)
-        self.len += 1
-
-    def insert(self, key: int, value: bytes):
-        if key > self.len:
-            raise IndexError
-        if len(value) != self.item_len:
-            raise ValueError
-        self.f.seek(key * self.item_len)
-        od = value
-        while od:
-            d = self.f.read(self.item_len)
-            if self.f.tell() != 0 and d:
-                self.f.seek(-self.item_len, 1)
-            self.f.write(od)
-
-            od = d
-        self.len += 1
-
-    def close(self):
-        self.f.close()
-
-    def __del__(self):
-        self.close()
+        return self._len
 
 
 class EmpID:
@@ -144,6 +189,7 @@ class IndexedData:
         self.index = ListFile(index.open('r+b'), item_len=idx_item_len)
         self.primary_key = primary_key
 
+    @functools.lru_cache(maxsize=1024)
     def __getitem__(self, item: int | bytes):
         if isinstance(item, int):
             item = self.index[item]
@@ -157,26 +203,35 @@ class IndexedData:
     def close(self):
         self.index.close()
 
-    def inserts(self, values: List[Tuple[int, bytes]]):
-        vs = sorted(values, key=lambda x: json.load(
-            open(self.data_fold / f'{int.from_bytes(x[1], "big", signed=False)}.json', 'r'))[
-            self.primary_key])
-        self.index.f.seek(vs[0][0] * self.index.item_len)
-        pre_writing_list = []
+    def inserts(self, values: list[tuple[bytes, Any]]):
+        """
+        Insert values into the index.
+        :param values:
+        :return:
+        """
+        # bisect_left
+        vs = sorted(values, key=lambda x: x[1])
+        vs = list(map(lambda x: (self.bisect_left(0, len(self.index) - 1, x[1]), *x), vs))
+
+        tell = self.index.f.seek(vs[0][0] * self.index.item_len)
+        pre_writing_list = deque()
 
         for i, v in enumerate(vs, start=0):
-            pos, value = v
+            pos, value, _ = v
             while True:
                 rd = self.index.f.read(self.index.item_len)
+                tell += self.index.item_len
 
                 if rd:
                     pre_writing_list.append(rd)
-                    if self.index.f.tell() >= self.index.item_len:
-                        self.index.f.seek(-self.index.item_len, 1)
+                    if tell >= self.index.item_len:
+                        tell = self.index.f.seek(-self.index.item_len, 1)
 
-                if self.index.f.tell() >= (pos + i) * self.index.item_len or not pre_writing_list:
+                if tell >= (pos + i) * self.index.item_len or not pre_writing_list:
                     break
 
-                self.index.f.write(pre_writing_list.pop(0))
+                self.index.f.write(pre_writing_list.popleft())
+                tell += self.index.item_len
 
             self.index.f.write(value)
+            tell += self.index.item_len

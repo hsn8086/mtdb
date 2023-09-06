@@ -30,19 +30,19 @@ def main():
     #         print(v)
 
     d.close()
-    print('--------')
-    with open('test/index/age-int.idx', 'rb') as f:
-        ov = 0
-        while d:
-            d = f.read(6)
-            v = json.load(open(Path('test') / 'data' / f'{int.from_bytes(d, "big", signed=False)}.json', 'r'))[
-                'age']
-            if d:
-                print(v)
-                if v >= ov:
-                    ov = v
-                else:
-                    raise ValueError
+    # print('--------')
+    # with open('test/index/age-int.idx', 'rb') as f:
+    #     ov = 0
+    #     while d:
+    #         d = f.read(6)
+    #         v = json.load(open(Path('test') / 'data' / f'{int.from_bytes(d, "big", signed=False)}.json', 'r'))[
+    #             'age']
+    #         if d:
+    #             print(v)
+    #             if v >= ov:
+    #                 ov = v
+    #             else:
+    #                 raise ValueError
 
 
 if __name__ == '__main__':

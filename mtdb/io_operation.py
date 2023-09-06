@@ -20,12 +20,46 @@
 
 @Date       : 9/3/23 8:37 PM
 """
+import _collections_abc
+import collections
 import json
+from abc import abstractmethod
 from pathlib import Path
-from typing import IO, List, Dict, Tuple
+from typing import IO, List, Dict, Tuple, overload
+from bisect import bisect_left
+from collections.abc import MutableSequence
 
 
-class ListFile:
+class ListFile(MutableSequence):
+    @overload
+    @abstractmethod
+    def __delitem__(self, index: int) -> None:
+        ...
+
+    @overload
+    @abstractmethod
+    def __delitem__(self, index: slice) -> None:
+        ...
+
+    def __delitem__(self, index: int) -> None:
+        if index >= self.len:
+            raise IndexError
+        chunk_size = 1024 * 1024
+        start = index * self.item_len
+        while True:
+            self.f.seek(start + self.item_len)
+            d = self.f.read(chunk_size)
+            if not d:
+                break
+            self.f.seek(start)
+            self.f.write(d)
+            start += chunk_size
+        self.f.truncate(self.f.tell() - self.item_len)
+        self.len -= 1
+
+    def __len__(self) -> int:
+        return self.len
+
     def __init__(self, f: IO, item_len: int = 4):
         self.f = f
         self.item_len = item_len
@@ -110,31 +144,15 @@ class IndexedData:
         self.index = ListFile(index.open('r+b'), item_len=idx_item_len)
         self.primary_key = primary_key
 
-    def __getitem__(self, item):
-        return json.load(open(self.data_fold / f'{int.from_bytes(self.index[item], "big", signed=False)}.json', 'r'))[
+    def __getitem__(self, item: int | bytes):
+        if isinstance(item, int):
+            item = self.index[item]
+
+        return json.load(open(self.data_fold / f'{int.from_bytes(item, "big", signed=False)}.json', 'r'))[
             self.primary_key]
 
-    def binary_search(self, l, r, x):
-        if r == 0 and l == 0:
-            if x > self[0]:
-                return 1
-            return 0
-        if r >= l:
-            mid = int(l + (r - l) / 2)
-            # print(mid, self.index.len, l, r)
-            if self[mid] == x:
-                return mid
-            elif self[mid] > x:
-                return self.binary_search(l, mid - 1, x)
-            else:
-                return self.binary_search(mid + 1, r, x)
-        else:
-            if r < 0:
-                return 0
-            if l == r:
-                return r
-            else:
-                return l
+    def bisect_left(self, left, right, value):
+        return bisect_left(self.index, value, left, right, key=lambda y: self[y])
 
     def close(self):
         self.index.close()
@@ -150,15 +168,13 @@ class IndexedData:
             pos, value = v
             while True:
                 rd = self.index.f.read(self.index.item_len)
+
                 if rd:
                     pre_writing_list.append(rd)
-                else:
-                    break
+                    if self.index.f.tell() >= self.index.item_len:
+                        self.index.f.seek(-self.index.item_len, 1)
 
-                if self.index.f.tell() >= self.index.item_len and rd:
-                    self.index.f.seek(-self.index.item_len, 1)
-
-                if self.index.f.tell() >= (pos + i) * self.index.item_len:
+                if self.index.f.tell() >= (pos + i) * self.index.item_len or not pre_writing_list:
                     break
 
                 self.index.f.write(pre_writing_list.pop(0))

@@ -59,7 +59,7 @@ class FileDB:
                     p.touch()
 
                 data = IndexedData(self.path / 'data', p, k, idx_item_len=6)
-                idx_insert_pos = data.binary_search(0, data.index.len - 1, v)
+                idx_insert_pos = data.bisect_left(0, data.index.len - 1, v)
                 data.close()
                 self.insert_idx(k, v, _id, idx_insert_pos)
         if not (self.path / 'data').exists():

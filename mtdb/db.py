@@ -48,6 +48,17 @@ class FileDB:
         self.emp_ids = EmpID(eid_path.open('r+'))
         self.pre_insert_idx: Dict[str, Dict] = {}
 
+        self.idxed_data_map = {}
+
+    def get_idxed_data(self, key: str, value_type: type | str):
+        if isinstance(value_type, type):
+            value_type = value_type.__name__
+        if f'{key}-{value_type}' not in self.idxed_data_map:
+            self.idxed_data_map[f'{key}-{value_type}'] = IndexedData(self.path / 'data',
+                                                                     self.path / 'index' / f'{key}-{value_type}.idx',
+                                                                     key, idx_item_len=6)
+        return self.idxed_data_map[f'{key}-{value_type}']
+
     def insert(self, document: dict):
         _id = next(self.emp_ids)
         for key_of_doc, val_of_doc in document.items():
@@ -57,10 +68,6 @@ class FileDB:
                     p.parent.mkdir(parents=True)
                 if not p.exists():
                     p.touch()
-
-                data = IndexedData(self.path / 'data', p, key_of_doc, idx_item_len=6)
-                # idx_insert_pos = data.bisect_left(0, len(data.index) - 1, val_of_doc)
-                data.close()
                 self.insert_idx(key_of_doc, val_of_doc, _id)
         if not (self.path / 'data').exists():
             (self.path / 'data').mkdir()
@@ -71,7 +78,7 @@ class FileDB:
         value_type = type(value)
         if f'{key}-{value_type.__name__}' not in self.pre_insert_idx:
             self.pre_insert_idx[f'{key}-{value_type.__name__}'] = {}
-        self.pre_insert_idx[f'{key}-{value_type.__name__}'][_id] = { 'key': key, 'value_type': value_type,
+        self.pre_insert_idx[f'{key}-{value_type.__name__}'][_id] = {'key': key, 'value_type': value_type,
                                                                     'value': value}
 
     def insert_sche(self):
@@ -81,9 +88,9 @@ class FileDB:
             if not lock.acquire(5):
                 return
 
-            data = IndexedData(self.path / 'data', full_path, path.split('-')[0], idx_item_len=6)
+            data = self.get_idxed_data(*path.split('-'))
             # print(indexes)
-            data.inserts([(int.to_bytes(_id, 6, 'big', signed=False),d['value']) for _id, d in indexes.items()])
+            data.inserts([(int.to_bytes(_id, 6, 'big', signed=False), d['value']) for _id, d in indexes.items()])
             data.close()
             lock.release()
 

@@ -22,6 +22,7 @@
 """
 import time
 from pathlib import Path
+import signal
 
 
 def inf_gen():
@@ -54,3 +55,27 @@ class FileLock:
             return True
         except OSError:
             return False
+
+
+class Cacher:
+    def __init__(self):
+        self.map = {}
+
+    def register(self, func):
+        def warp(*args):
+
+            if args in self.map:
+                return self.map[args]
+            else:
+                rst = func(*args)
+                self.map[args] = rst
+                return rst
+
+        return warp
+
+    def clear(self):
+        self.map.clear()
+
+    def remove(self, *args):
+        if args in self.map:
+            self.map.pop(args)

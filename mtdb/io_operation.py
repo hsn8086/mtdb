@@ -32,6 +32,8 @@ from collections.abc import MutableSequence
 from queue import LifoQueue
 from collections import deque
 
+from mtdb.utils import Cacher
+
 
 class ListFile(MutableSequence):
     """
@@ -188,14 +190,20 @@ class IndexedData:
         self.data_fold = data_fold
         self.index = ListFile(index.open('r+b'), item_len=idx_item_len)
         self.primary_key = primary_key
+        self.cacher = Cacher()
 
-    @functools.lru_cache(maxsize=1024)
+        def __read(_id):
+            return json.load(open(self.data_fold / f'{_id}.json', 'r'))[
+                self.primary_key]
+
+        self._read = self.cacher.register(__read)
+
     def __getitem__(self, item: int | bytes):
         if isinstance(item, int):
             item = self.index[item]
+        _id = int.from_bytes(item, "big", signed=False)
 
-        return json.load(open(self.data_fold / f'{int.from_bytes(item, "big", signed=False)}.json', 'r'))[
-            self.primary_key]
+        return self._read(_id)
 
     def bisect_left(self, left, right, value):
         return bisect_left(self.index, value, left, right, key=lambda y: self[y])
@@ -214,13 +222,13 @@ class IndexedData:
         vs = list(map(lambda x: (self.bisect_left(0, len(self.index) - 1, x[1]), *x), vs))
 
         tell = self.index.f.seek(vs[0][0] * self.index.item_len)
-        pre_writing_list = deque()
+        pre_writing_list = []
 
         for i, v in enumerate(vs, start=0):
             pos, value, _ = v
             while True:
                 rd = self.index.f.read(self.index.item_len)
-                tell += self.index.item_len
+                tell += len(rd)
 
                 if rd:
                     pre_writing_list.append(rd)
@@ -230,8 +238,6 @@ class IndexedData:
                 if tell >= (pos + i) * self.index.item_len or not pre_writing_list:
                     break
 
-                self.index.f.write(pre_writing_list.popleft())
-                tell += self.index.item_len
+                tell += self.index.f.write(pre_writing_list.pop(0))
 
-            self.index.f.write(value)
-            tell += self.index.item_len
+            tell += self.index.f.write(value)
